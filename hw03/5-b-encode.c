@@ -21,7 +21,7 @@ void csv_to_binary(const char *csv_filename, const char *binary_filename) {
     FILE *binary_file = fopen(binary_filename, "wb");
 
     if (!csv_file || !binary_file) {
-        perror("文件打开失败");
+        perror("File open failed");
         exit(EXIT_FAILURE);
     }
 
@@ -40,6 +40,8 @@ void csv_to_binary(const char *csv_filename, const char *binary_filename) {
         record.department_length = strlen(department);
         strncpy(record.department, department, MAX_DEPARTMENT_LENGTH);
         record.department[record.department_length] = '\0';
+
+        record.id = __builtin_bswap32(record.id);
 
         fwrite(&record.id, sizeof(record.id), 1, binary_file);
         fwrite(&record.name_length, sizeof(record.name_length), 1, binary_file);
