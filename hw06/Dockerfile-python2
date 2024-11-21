@@ -1,0 +1,8 @@
+
+FROM ubuntu:20.04
+
+RUN apt-get update && apt-get install -y python2
+
+RUN ln -sf /usr/bin/python2 /usr/bin/python
+
+CMD ["python", "--version"]
