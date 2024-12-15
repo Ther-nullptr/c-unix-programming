@@ -12,6 +12,7 @@
 #include <sys/wait.h>
 // #include <asm-generic/siginfo.h>
 #include <fcntl.h>
+#include <sys/shm.h>
 
 #include <readline/readline.h>
 #include <readline/history.h>
@@ -46,8 +47,8 @@ typedef struct
     int type;
 } Job;
 
-Job jobs[MAX_JOBS];
-int job_count = 0;
+Job* jobs;//[MAX_JOBS];
+int* job_count;
 
 // Function to check if a command is executable
 int is_executable(char *path)
@@ -56,66 +57,104 @@ int is_executable(char *path)
     return stat(path, &sb) == 0 && sb.st_mode & S_IXUSR;
 }
 
-void add_job(pid_t pid, const char *command, int type)
+Job* add_job(pid_t pid, const char *command, int type)
 {
-    if (job_count < MAX_JOBS)
+    int job_count_val = *job_count;
+    if (job_count_val < MAX_JOBS)
     {
-        jobs[job_count].pid = pid;
-        strncpy(jobs[job_count].command, command, COMMAND_SIZE - 1);
-        jobs[job_count].command[COMMAND_SIZE - 1] = '\0';
-        jobs[job_count].status = RUNNING;
-        jobs[job_count].type = type;
-        job_count++;
+        jobs[job_count_val].pid = pid;
+        strncpy(jobs[job_count_val].command, command, COMMAND_SIZE - 1);
+        jobs[job_count_val].command[COMMAND_SIZE - 1] = '\0';
+        jobs[job_count_val].status = RUNNING;
+        jobs[job_count_val].type = type;
+        printf("%d: add job %s\n", *job_count, command);
+        *job_count = job_count_val + 1;
+        printf("job count: %d\n", *job_count);
     }
     else
     {
         fprintf(stderr, "Too many jobs\n");
     }
+
+    return (jobs + job_count_val);
 }
 
 void remove_job(pid_t pid)
 {
-    for (int i = 0; i < job_count; i++)
+    int i;
+    int job_count_val = *job_count;
+    for (i = 0; i < job_count_val; i++)
     {
         if (jobs[i].pid == pid)
         {
-            // 1.when the jobs has been changed to FG, it will be removed
-            // 2.when the jobs is still in BG:
-            //   a. if it is DONE, it will be removed
-            //   b. if it is SUSPENDED, it will change to DONE
-            if (jobs[i].status == DONE)
-            {
-                for (int j = i; j < job_count - 1; j++)
-                {
-                    jobs[j] = jobs[j + 1];
-                }
-                job_count--;
-            }
-            else
-            {
-                jobs[i].status = DONE;
-            }
+            break;
         }
+    }
+    // printf("remove job %s\n", jobs[i].command);
+    if (i < job_count_val)
+    {
+        for (int j = i; j < job_count_val; j++)
+        {
+            printf("move job %s to %s\n", jobs[j + 1].command, jobs[j].command);
+            jobs[j] = jobs[j + 1];
+
+        }
+        *job_count = job_count_val - 1;
+        printf("job count: %d\n", *job_count);
     }
 }
 
 void do_jobs()
 {
-    for (int i = 0; i < job_count; i++)
+    int done_count = 0;
+    int done_pid[MAX_JOBS];
+    int job_count_val = *job_count;
+    if (job_count_val == 0)
     {
-        printf("[%d] %d %s\n", i + 1, jobs[i].pid, jobs[i].command);
+        fprintf(stderr, "No jobs\n");
+        return;
+    }
+    for (int i = 0; i < job_count_val; i++)
+    {
+        char *status;
+        switch (jobs[i].status)
+        {
+        case RUNNING:
+            status = "RUNNING";
+            break;
+        case SUSPENDED:
+            status = "SUSPENDED";
+            break;
+        case DONE:
+            status = "DONE";
+            done_pid[done_count++] = jobs[i].pid;
+            break;
+        default:
+            status = "UNKNOWN";
+            break;
+        }
+        if (jobs[i].type == BG)
+        {
+            printf("[%d] %d %s %s\n", i + 1, jobs[i].pid, jobs[i].command, status);
+        }
+
+    }
+    for (int i = 0; i < done_count; i++)
+    {
+        printf("remove job %d, %s\n", done_pid[i], jobs[i].command);
+        remove_job(done_pid[i]);
     }
 }
 
 void do_fg(int job_id)
 {
     // printf("job_id: %d, job_count: %d, jobs[job_id - 1].active: %d\n", job_id, job_count, jobs[job_id - 1].active);
-    if (job_count == 0)
+    if (*job_count == 0)
     {
         fprintf(stderr, "No jobs\n");
         return;
     }
-    if (job_id <= 0 || job_id > job_count)
+    if (job_id <= 0 || job_id > *job_count)
     {
         fprintf(stderr, "Invalid job ID\n");
         return;
@@ -133,12 +172,12 @@ void do_fg(int job_id)
 
 void do_bg(int job_id)
 {
-    if (job_count == 0)
+    if (*job_count == 0)
     {
         fprintf(stderr, "No jobs\n");
         return;
     }
-    if (job_id <= 0 || job_id > job_count)
+    if (job_id <= 0 || job_id > *job_count)
     {
         fprintf(stderr, "Invalid job ID\n");
         return;
@@ -171,32 +210,57 @@ void do_history()
 void handle_sigchld(int sig, siginfo_t* info, void* vcontext)
 {
     (void)sig;
+    int i;
     int saved_errno = errno;
     pid_t pid = info->si_pid;
-    remove_job(pid);
-    errno = saved_errno;
-}
-
-void handle_sigtstp(int sig, siginfo_t* info, void* vcontext)
-{
-    (void)sig;
-    pid_t pid = info->si_pid;
     // find the job
-    for (int i = 0; i < job_count; i++)
+    for (i = 0; i < *job_count; i++)
     {
         if (jobs[i].pid == pid)
         {
-            // if the job is in FG, change it to BG
-            if (jobs[i].type == FG)
-            {
-                jobs[i].type = BG;
-                jobs[i].status = SUSPENDED;
-                if (kill(pid, SIGSTOP) == -1)
-                {
-                    perror("kill");
-                }
-            }
             break;
+        }
+    }
+    if (i < *job_count)
+    {
+        if (jobs[i].type == BG && jobs[i].status == RUNNING)
+        {
+            jobs[i].status = DONE;
+        }
+        else if (jobs[i].type == BG && jobs[i].status == SUSPENDED)
+        {
+            // do nothing
+        }
+        else
+        {
+            remove_job(pid);
+        }
+    }
+
+    errno = saved_errno;
+}
+
+void handle_sigtstp(int sig)
+{
+    (void)sig;
+    printf("\n");
+    int i;
+    // find the job
+    for (i = *job_count; i >=0 ; i--)
+    {
+        if (jobs[i].type == FG)
+        {
+            break;
+        }
+    }
+
+    if (i >= 0)
+    {
+        jobs[i].type = BG;
+        jobs[i].status = SUSPENDED;
+        if (kill(jobs[i].pid, SIGSTOP) == -1)
+        {
+            perror("kill");
         }
     }
 }
@@ -436,7 +500,7 @@ void execute_command(char *cmd, int background)
             // printf("--------------------");
             add_job(pid, cmd, BG);
             waitpid(pid, NULL, WNOHANG);
-            printf("[%d] %d\n", job_count, pid);
+            printf("[%d] %d\n", *job_count, pid);
         }
         else
         {
@@ -496,6 +560,22 @@ void execute_pipeline(char **cmds, int cmd_count, int background)
             perror("fork");
         }
     }
+}
+
+void init_jobs()
+{
+    // use shm
+    int shm_id = shmget((key_t)1234, sizeof(Job) * MAX_JOBS + sizeof(int), IPC_CREAT | 0666);
+    if (shm_id == -1)
+    {
+        perror("shmget");
+        exit(1);
+    }
+    void *shm = shmat(shm_id, 0, 0);
+    jobs = (Job *)shm;
+    job_count = (int *)((char *)shm + sizeof(jobs) * MAX_JOBS);
+
+    *job_count = 0;
 }
 
 void process_commands(char *input)
@@ -559,9 +639,11 @@ int main(int argc, char **argv)
 
     signal(SIGTSTP, handle_sigtstp); // when receive ctrl+z
     signal(SIGSTOP, handle_sigtstp);
+    init_jobs();
 
     while (1)
     {
+        
         set_prompt(command);
         // printf("%s", command);
         line = readline(command);
