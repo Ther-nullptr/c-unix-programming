@@ -34,8 +34,8 @@
 #define DONE 2
 
 // marcos for job type
-#define FG 0
-#define BG 1
+#define FOREGROUND 0
+#define BACKGROUND 1
 
 char last_dir[LAST_DIR_SIZE];
 
@@ -45,10 +45,13 @@ typedef struct
     char command[COMMAND_SIZE];
     int status;
     int type;
+    int fg_bg_flag;
 } Job;
 
-Job* jobs;//[MAX_JOBS];
-int* job_count;
+Job *jobs; //[MAX_JOBS];
+int *job_count;
+
+struct sigaction sa;
 
 // Function to check if a command is executable
 int is_executable(char *path)
@@ -57,7 +60,7 @@ int is_executable(char *path)
     return stat(path, &sb) == 0 && sb.st_mode & S_IXUSR;
 }
 
-Job* add_job(pid_t pid, const char *command, int type)
+void add_job(pid_t pid, const char *command, int type)
 {
     int job_count_val = *job_count;
     if (job_count_val < MAX_JOBS)
@@ -67,16 +70,13 @@ Job* add_job(pid_t pid, const char *command, int type)
         jobs[job_count_val].command[COMMAND_SIZE - 1] = '\0';
         jobs[job_count_val].status = RUNNING;
         jobs[job_count_val].type = type;
-        printf("%d: add job %s\n", *job_count, command);
+        jobs[job_count_val].fg_bg_flag = 0;
         *job_count = job_count_val + 1;
-        printf("job count: %d\n", *job_count);
     }
     else
     {
         fprintf(stderr, "Too many jobs\n");
     }
-
-    return (jobs + job_count_val);
 }
 
 void remove_job(pid_t pid)
@@ -95,12 +95,9 @@ void remove_job(pid_t pid)
     {
         for (int j = i; j < job_count_val; j++)
         {
-            printf("move job %s to %s\n", jobs[j + 1].command, jobs[j].command);
             jobs[j] = jobs[j + 1];
-
         }
         *job_count = job_count_val - 1;
-        printf("job count: %d\n", *job_count);
     }
 }
 
@@ -133,63 +130,110 @@ void do_jobs()
             status = "UNKNOWN";
             break;
         }
-        if (jobs[i].type == BG)
+        if (jobs[i].type == BACKGROUND)
         {
             printf("[%d] %d %s %s\n", i + 1, jobs[i].pid, jobs[i].command, status);
         }
-
     }
     for (int i = 0; i < done_count; i++)
     {
-        printf("remove job %d, %s\n", done_pid[i], jobs[i].command);
         remove_job(done_pid[i]);
     }
 }
 
 void do_fg(int job_id)
 {
+    int bg_count = 0;
+    int job_count_val = *job_count;
     // printf("job_id: %d, job_count: %d, jobs[job_id - 1].active: %d\n", job_id, job_count, jobs[job_id - 1].active);
-    if (*job_count == 0)
+    if (job_count_val == 0)
     {
         fprintf(stderr, "No jobs\n");
         return;
     }
-    if (job_id <= 0 || job_id > *job_count)
+    if (job_id <= 0 || job_id > job_count_val)
     {
         fprintf(stderr, "Invalid job ID\n");
         return;
     }
-    pid_t pid = jobs[job_id - 1].pid;
-    jobs[job_id - 1].status = RUNNING;
-    if (kill(pid, SIGCONT) == -1)
+    for (int i = 0; i < job_count_val; i++)
     {
-        perror("kill");
-        return;
+        if (jobs[i].type == BACKGROUND)
+        {
+            bg_count++;
+        }
+        if (bg_count == job_id)
+        {
+            printf("%s\n", jobs[i].command);
+            if (jobs[i].status == SUSPENDED)
+            {
+                jobs[i].type = FOREGROUND;
+                jobs[i].status = RUNNING;
+                jobs[i].fg_bg_flag = 1;
+                if (kill(jobs[i].pid, SIGCONT) == -1)
+                {
+                    perror("kill");
+                    return;
+                }
+                int status;
+                waitpid(jobs[i].pid, &status, 0);
+            }
+            else
+            {
+                jobs[i].type = FOREGROUND;
+                jobs[i].status = RUNNING;
+                jobs[i].fg_bg_flag = 1;
+                int status;
+                waitpid(jobs[i].pid, &status, 0);
+                remove_job(jobs[i].pid);
+            }
+        }
     }
-    int status;
-    waitpid(pid, &status, 0);
+    if (bg_count == 0)
+    {
+        fprintf(stderr, "No background job currently\n");
+    }
 }
 
 void do_bg(int job_id)
 {
-    if (*job_count == 0)
+    int bg_count = 0;
+    int job_count_val = *job_count;
+    if (job_count_val == 0)
     {
         fprintf(stderr, "No jobs\n");
         return;
     }
-    if (job_id <= 0 || job_id > *job_count)
+    if (job_id <= 0 || job_id > job_count_val)
     {
         fprintf(stderr, "Invalid job ID\n");
         return;
     }
-    pid_t pid = jobs[job_id - 1].pid;
-    jobs[job_id - 1].status = RUNNING;
-    if (kill(pid, SIGCONT) == -1)
+    for (int i = 0; i < job_count_val; i++)
     {
-        perror("kill");
-        return;
+        if (jobs[i].type == BACKGROUND)
+        {
+            bg_count++;
+        }
+        if (bg_count == job_id && jobs[i].status == SUSPENDED)
+        {
+            // printf("%s\n", jobs[i].command);
+            jobs[i].status = RUNNING;
+            jobs[i].fg_bg_flag = 1;
+            if (kill(jobs[i].pid, SIGCONT) == -1)
+            {
+                perror("kill");
+                return;
+            }
+
+            break;
+        }
     }
-    printf("[%d] %d\n", job_id, pid);
+
+    if (bg_count == 0)
+    {
+        fprintf(stderr, "No background job currently\n");
+    }
 }
 
 void do_history()
@@ -206,49 +250,101 @@ void do_history()
     }
 }
 
-// Signal handler for cleaning up finished background jobs
-void handle_sigchld(int sig, siginfo_t* info, void* vcontext)
+void do_about()
 {
-    (void)sig;
+    // colorful print
+    printf("\033[1;32m");
+    printf("yalsh ");
+    printf("\033[0m");
+    printf("\033[1;31m");
+    printf("Yet Another Unix Shell\n");
+    printf("\033[0m");
+    printf("\033[1;33mAuthor\033[0m: Ther\n");
+    printf("\033[1;34mEmail\033[0m: yujin-wa24@mails.tsinghua.edu.cn\n");
+
+    printf("\033[1;35mSupport built-in commands\033[0m: \n");
+    printf("\033[4mexit\033[0m - exit the shell\n");
+    printf("\033[4mcd\033[0m [dir] - change the current working directory\n");
+    printf("\033[4mecho\033[0m [message] - print the message\n");
+    printf("\033[4mhistory\033[0m - show the command history\n");
+    printf("\033[4mbg\033[0m [job_id] - continue the job in background\n");
+    printf("\033[4mfg\033[0m [job_id] - continue the job in foreground\n");
+    printf("\033[4mjobs\033[0m - show the background jobs\n");
+    printf("\033[4mabout\033[0m - show the information about the shell\n");
+}
+
+void do_pwd()
+{
+    char cwd[WORKING_DIR_SIZE];
+    if (getcwd(cwd, WORKING_DIR_SIZE) == NULL)
+    {
+        perror("getcwd");
+    }
+    else
+    {
+        printf("%s\n", cwd);
+    }
+}
+
+void do_clear()
+{
+    printf("\033[H\033[J");
+}
+
+// Signal handler for cleaning up finished background jobs
+void handle_sigchld(int sig, siginfo_t *info, void *vcontext)
+{
+    // printf("handle_sigchld\n");
+    int job_count_val = *job_count;
     int i;
     int saved_errno = errno;
     pid_t pid = info->si_pid;
     // find the job
-    for (i = 0; i < *job_count; i++)
+    for (i = 0; i < job_count_val; i++)
     {
         if (jobs[i].pid == pid)
         {
             break;
         }
     }
-    if (i < *job_count)
+    if (i < job_count_val)
     {
-        if (jobs[i].type == BG && jobs[i].status == RUNNING)
+        // printf("jobs[%d].type: %d, jobs[%d].status: %d\n", i, jobs[i].type, i, jobs[i].status);
+        if (jobs[i].type == BACKGROUND && jobs[i].status == RUNNING)
         {
-            jobs[i].status = DONE;
+            // printf("state: job[%d] %d %s\n", i + 1, pid, jobs[i].command);
+            if (jobs[i].fg_bg_flag)
+            {
+                jobs[i].status = RUNNING;
+                jobs[i].fg_bg_flag = 0;
+                // printf("ewojhfeuoihfiuowqhfdiqw[%d] %d %s\n", i + 1, pid, jobs[i].command);
+            }
+            else
+            {
+                jobs[i].status = DONE;
+                printf("[%d] %d Done %s\n", i + 1, pid, jobs[i].command);
+            }
         }
-        else if (jobs[i].type == BG && jobs[i].status == SUSPENDED)
-        {
-            // do nothing
-        }
-        else
+        else if (jobs[i].type == FOREGROUND || (jobs[i].type == BACKGROUND && jobs[i].status == DONE))
         {
             remove_job(pid);
         }
     }
+    // delete
 
     errno = saved_errno;
 }
 
 void handle_sigtstp(int sig)
 {
-    (void)sig;
+    // printf("handle_sigtstp\n");
+    int job_count_val = *job_count;
     printf("\n");
     int i;
     // find the job
-    for (i = *job_count; i >=0 ; i--)
+    for (i = job_count_val; i >= 0; i--)
     {
-        if (jobs[i].type == FG)
+        if (jobs[i].type == FOREGROUND)
         {
             break;
         }
@@ -256,7 +352,8 @@ void handle_sigtstp(int sig)
 
     if (i >= 0)
     {
-        jobs[i].type = BG;
+        // printf("suspend %s %d\n", jobs[i].command, jobs[i].pid);
+        jobs[i].type = BACKGROUND;
         jobs[i].status = SUSPENDED;
         if (kill(jobs[i].pid, SIGSTOP) == -1)
         {
@@ -301,7 +398,7 @@ void set_prompt(char *prompt)
     sprintf(time_str, "%04d-%02d-%02d %02d:%02d:%02d", local->tm_year + 1900, local->tm_mon + 1, local->tm_mday, local->tm_hour, local->tm_min, local->tm_sec);
 
     // format the prompt
-    sprintf(prompt, "[%s@%s %s] (%s)\n $ ", pwp->pw_name, host, cwd, time_str);
+    sprintf(prompt, "[\033[1;37m%s@%s\033[0m\033[1;36m %s\033[0m] \033[46;37m(%s)\033[0m\n ➜  ", pwp->pw_name, host, cwd, time_str);
 }
 
 // built-in commands: exit, cd, echo, export, history, bg, fg, jobs
@@ -316,20 +413,10 @@ void do_cd(int argc, char **argv)
         }
     }
     else if (argc == 2)
-    { // cd -
-        if (strcmp(argv[1], "-") == 0)
+    {
+        if (chdir(argv[1]) == -1)
         {
-            if (chdir(last_dir) == -1)
-            {
-                printf("cd: %s\n", strerror(errno));
-            }
-        }
-        else
-        { // cd dir
-            if (chdir(argv[1]) == -1)
-            {
-                printf("cd: %s\n", strerror(errno));
-            }
+            printf("cd: %s\n", strerror(errno));
         }
     }
     else
@@ -341,15 +428,6 @@ void do_cd(int argc, char **argv)
 void do_echo(char *message)
 {
     printf("%s\n", message);
-}
-
-void do_export(char *var)
-{
-    char *value = getenv(var);
-    if (value != NULL)
-    {
-        printf("%s=%s\n", var, value);
-    }
 }
 
 void do_exit()
@@ -372,6 +450,10 @@ void execute_command(char *cmd, int background)
     char *input_file = NULL;
     char *output_file = NULL;
     int append_mode = 0;
+
+    // copy the command to history
+    char cmd_copy[COMMAND_SIZE];
+    strncpy(cmd_copy, cmd, COMMAND_SIZE - 1);
 
     // Split the command into arguments
     split_string(cmd, " ", args, &arg_count);
@@ -399,6 +481,54 @@ void execute_command(char *cmd, int background)
             args[i] = NULL;
             break;
         }
+    }
+
+    // Check whether the command is internal or external
+    // internel commands: cd, echo, export, history, exit, jobs, fg, bg
+    int internal = 1;
+    if (strcmp(args[0], "cd") == 0)
+    {
+        do_cd(arg_count, args);
+    }
+    else if (strcmp(args[0], "pwd") == 0)
+    {
+        do_pwd();
+    }
+    else if (strcmp(args[0], "clear") == 0)
+    {
+        do_clear();
+    }
+    else if (strcmp(args[0], "echo") == 0)
+    {
+        do_echo(args[1]);
+    }
+    else if (strcmp(args[0], "history") == 0)
+    {
+        do_history();
+    }
+    else if (strcmp(args[0], "exit") == 0)
+    {
+        do_exit();
+    }
+    else if (strcmp(args[0], "jobs") == 0)
+    {
+        do_jobs();
+    }
+    else if (strcmp(args[0], "fg") == 0)
+    {
+        do_fg(atoi(args[1]));
+    }
+    else if (strcmp(args[0], "bg") == 0)
+    {
+        do_bg(atoi(args[1]));
+    }
+    else if (strcmp(args[0], "about") == 0)
+    {
+        do_about();
+    }
+    else
+    {
+        internal = 0;
     }
 
     pid_t pid = fork();
@@ -438,74 +568,40 @@ void execute_command(char *cmd, int background)
             close(fd);
         }
 
-        // Check whether the command is internal or external
-        // internel commands: cd, echo, export, history, exit, jobs, fg, bg
-        if (strcmp(args[0], "cd") == 0)
-        {
-            do_cd(arg_count, args);
-            exit(0);
-        }
-        else if (strcmp(args[0], "echo") == 0)
-        {
-            do_echo(args[1]);
-            exit(0);
-        }
-        else if (strcmp(args[0], "export") == 0)
-        {
-            do_export(args[1]);
-            exit(0);
-        }
-        else if (strcmp(args[0], "history") == 0)
-        {
-            do_history();
-            exit(0);
-        }
-        else if (strcmp(args[0], "exit") == 0)
-        {
-            do_exit();
-            exit(0);
-        }
-        else if (strcmp(args[0], "jobs") == 0)
-        {
-            do_jobs();
-            exit(0);
-        }
-        else if (strcmp(args[0], "fg") == 0)
-        {
-            do_fg(atoi(args[1]));
-            exit(0);
-        }
-        else if (strcmp(args[0], "bg") == 0)
-        {
-            do_bg(atoi(args[1]));
-            exit(0);
-        }
-
         // externel
-        if (is_executable(args[0]))
+        if (!internal)
         {
-            execv(args[0], args);
+            if (is_executable(args[0]))
+            {
+                execv(args[0], args);
+            }
+            else
+            {
+                execvp(args[0], args);
+            }
+            perror("execvp");
+            exit(1);
         }
         else
         {
-            execvp(args[0], args);
+            exit(0);
         }
-        perror("execvp");
-        exit(1);
     }
     else if (pid > 0)
     { // Parent process
+        int status;
         if (background)
         {
             // printf("--------------------");
-            add_job(pid, cmd, BG);
-            waitpid(pid, NULL, WNOHANG);
+
+            add_job(pid, cmd_copy, BACKGROUND);
+            waitpid(pid, &status, WNOHANG);
             printf("[%d] %d\n", *job_count, pid);
         }
         else
         {
-            add_job(pid, cmd, FG);
-            waitpid(pid, NULL, WUNTRACED);
+            add_job(pid, cmd_copy, FOREGROUND);
+            waitpid(pid, &status, WUNTRACED);
         }
     }
     else
@@ -565,7 +661,7 @@ void execute_pipeline(char **cmds, int cmd_count, int background)
 void init_jobs()
 {
     // use shm
-    int shm_id = shmget((key_t)1234, sizeof(Job) * MAX_JOBS + sizeof(int), IPC_CREAT | 0666);
+    int shm_id = shmget(IPC_CREAT, sizeof(Job) * MAX_JOBS + sizeof(int) * 2, IPC_CREAT | 0666);
     if (shm_id == -1)
     {
         perror("shmget");
@@ -619,31 +715,32 @@ void process_commands(char *input)
     }
 }
 
+void init_signal()
+{
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = handle_sigchld;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGCHLD, &sa, NULL);
+
+    signal(SIGTSTP, handle_sigtstp);
+    signal(SIGSTOP, handle_sigtstp);
+}
+
 int main(int argc, char **argv)
 {
     char *line;
     char command[COMMAND_SIZE];
 
-
     printf("yaush: Yet Another Unix Shell\n");
     printf("Type 'exit' to quit\n");
 
-    // build a history list
-
-    // Set up signal handler for SIGCHLD
-    struct sigaction sa;
-    sa.sa_handler = handle_sigchld;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART | SA_SIGINFO;
-    sigaction(SIGCHLD, &sa, NULL); // when receive
-
-    signal(SIGTSTP, handle_sigtstp); // when receive ctrl+z
-    signal(SIGSTOP, handle_sigtstp);
+    // initialize the signal and jobs
+    init_signal();
     init_jobs();
 
     while (1)
     {
-        
         set_prompt(command);
         // printf("%s", command);
         line = readline(command);
@@ -654,10 +751,7 @@ int main(int argc, char **argv)
         if (*line)
         {
             add_history(line);
-            // process_commands(line);
             process_commands(line);
         }
-        // add_history(line);
-        
     }
 }
