@@ -2,3 +2,6 @@
 build/
 *.bin
 *.csv
+
+*.o
+yaush
